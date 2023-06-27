@@ -324,34 +324,60 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             half = ArithConstantOp(f64, 0.5)
             zero_izero = CreateOp(complex128, zero, zero)
             one_izero = CreateOp(complex128, one, zero)
+            zero_ione = CreateOp(complex128, zero, one)
             half_izero = CreateOp(complex128, half, zero)
+            zero_imone = CreateOp(complex128, zero, mone)
 
             # We need to perform arithmetic 
             # Use the definition of U3 found in pennylane.U3.html
             # matrix[0,0] = cos(theta/2)
-            divOp = DivFOp(theta, two)
-            cosOp = CreateOp(complex128, CosOp(divOp), zero)
-            m00 = cosOp
+            # divOp = DivFOp(theta, two)
+            # cosOp = CreateOp(complex128, CosOp(divOp), zero)
+            # m00 = cosOp
+            itheta = CreateOp(complex128, zero, theta)
+            e_itheta = ExpOp(itheta)
+            addOp = AddOp(one_izero, e_itheta)
+            tmp1 = MulOp(half_izero, addOp)
+            m00 = tmp1
 
             # matrix[0,1] = -exp(i * lambda) * sin(theta / 2)
-            zero_imone = CreateOp(complex128, zero, mone)
-            sinOp = CreateOp(complex128, SinOp(divOp), zero)
-            zero_ilambda = CreateOp(complex128, zero, _lambda)
-            expOp = ExpOp(zero_ilambda)
-            mulOp = MulOp(zero_imone, expOp)
-            m01 = MulOp(expOp, sinOp)
+            #zero_imone = CreateOp(complex128, zero, mone)
+            #sinOp = CreateOp(complex128, SinOp(divOp), zero)
+            #zero_ilambda = CreateOp(complex128, zero, _lambda)
+            #expOp = ExpOp(zero_ilambda)
+            #mulOp = MulOp(zero_imone, expOp)
+            #m01 = MulOp(expOp, sinOp)
+            subOp = SubOp(one_izero, e_itheta)
+            ilambda = CreateOp(complex128, zero, _lambda)
+            e_ilambda = ExpOp(ilambda)
+            tmp = MulOp(zero_imone, e_ilambda)
+            tmp1 = MulOp(half_izero, tmp)
+            tmp2 = MulOp(tmp1, subOp)
+            m01 = tmp2
         
             # matrix[1,0] = exp (i * phi) * sin (theta / 2)
-            zero_iphi = CreateOp(complex128, zero, phi)
-            expOp = ExpOp(zero_iphi)
-            mulOp = MulOp(expOp, sinOp)
-            m10 = mulOp
+            #zero_iphi = CreateOp(complex128, zero, phi)
+            #expOp = ExpOp(zero_iphi)
+            #mulOp = MulOp(expOp, sinOp)
+            #m10 = mulOp
+            iphi = CreateOp(complex128, zero, phi)
+            e_iphi = ExpOp(iphi)
+            ie_iphi = MulOp(zero_ione, e_iphi)
+            tmp = MulOp(ie_iphi, subOp)
+            tmp1 = MulOp(tmp, half_izero)
+            m10 = tmp1
+
 
             # matrix[1,1] = exp (i * (phi + lambda)) * cos (theta / 2)
-            addOp = AddOp(zero_iphi, zero_ilambda)
-            expOp = ExpOp(addOp)
-            mulOp = MulOp(expOp, cosOp)
-            m11 = mulOp
+            #addOp = AddOp(zero_iphi, zero_ilambda)
+            #expOp = ExpOp(addOp)
+            #mulOp = MulOp(expOp, cosOp)
+            #m11 = mulOp
+            iphi_plus_lambda = AddOp(ilambda, iphi)
+            e_iphi_plus_lambda = ExpOp(iphi_plus_lambda)
+            tmp = MulOp(e_iphi_plus_lambda, half_izero)
+            tmp1 = MulOp(tmp, addOp)
+            m11 = tmp1
 
             tensor_complex128_= mlir_quantum.ir.RankedTensorType.get([2, 2], complex128)
             matrix = FromElementsOp.build_generic([tensor_complex128_], [m00.results[0], m01.results[0], m10.results[0], m11.results[0]])
