@@ -18,7 +18,7 @@ from mlir_quantum.ir import Context, Module, InsertionPoint, Location, Block
 def insert_qreg(ctx):
     qreg_type = mlir_quantum.ir.OpaqueType.get("quantum", "reg", ctx)
     i64 = mlir_quantum.ir.IntegerType.get_signless(64, ctx)
-    size_attr = mlir_quantum.ir.IntegerAttr.get(i64, 10)
+    size_attr = mlir_quantum.ir.IntegerAttr.get(i64, 1)
     return AllocOp(qreg_type, nqubits_attr=size_attr).results
 
 def insert_main(ctx):
@@ -183,9 +183,24 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             constant = ArithConstantOp(f64, float(floatLiteral))
             ctx.mlir = constant.results[0]
 
+    def identifierToMLIR(self, ctx):
+        with self.stack.top() as frame:
+            ctx.mlir = frame[ctx.Identifier().getText()]
+
+    def exitMultiplicativeExpression(self, ctx):
+        if not ctx.SLASH():
+            raise NotImplementedError("Not yet implemented!")
+        numerator = ctx.expression()[0]
+        denominator = ctx.expression()[1]
+        with self.stack.top():
+            divOp = DivFOp(numerator.mlir, denominator.mlir)
+            ctx.mlir = divOp.results[0]
+
     def exitLiteralExpression(self, ctx):
         if ctx.FloatLiteral():
             self.floatLiteralToMLIR(ctx)
+        elif ctx.Identifier():
+            self.identifierToMLIR(ctx)
         else:
             raise NotImplementedError("Not yet implemented!")
 
@@ -402,6 +417,9 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
                 funcName = mlir_quantum.ir.FlatSymbolRefAttr.get(gateName)
                 qubits = ctx.gateOperandList().getText()
                 params = []
+                exprListCtx = ctx.expressionList()
+                for e in exprListCtx.expression():
+                    params.append(e.mlir)
                 for qubit in qubits:
                     params.append(frame[qubit])
                 CallOp([], funcName, params)
