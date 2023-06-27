@@ -5,11 +5,12 @@ from openqasm_reference_parser import qasm3Lexer
 from openqasm_reference_parser import qasm3Parser, qasm3ParserListener
 import catalyst
 from mlir_quantum.dialects.func import FuncOp, ReturnOp, CallOp
-from mlir_quantum.dialects.arith import ConstantOp as ArithConstantOp, AddFOp, DivFOp
+from mlir_quantum.dialects.arith import ConstantOp as ArithConstantOp, AddFOp, DivFOp, SubFOp, CmpIOp
 from mlir_quantum.dialects.math import CosOp, SinOp
 from mlir_quantum.dialects.complex import ExpOp, CreateOp, SubOp, MulOp, AddOp
 from mlir_quantum.dialects.quantum import AllocOp, QubitUnitaryOp, ExtractOp, PrintStateOp, DeviceOp, DeallocOp, InitializeOp, FinalizeOp
-from mlir_quantum.dialects.tensor import FromElementsOp
+from mlir_quantum.dialects.tensor import FromElementsOp, GenerateOp, YieldOp, SplatOp
+from mlir_quantum.dialects.scf import IfOp, YieldOp as SCFYieldOp
 
 import mlir_quantum
 from mlir_quantum.ir import Context, Module, InsertionPoint, Location, Block
@@ -41,142 +42,278 @@ def main(argv):
     walker = ParseTreeWalker()
     with Context() as ctx, Location.file("f.mlir", line=0, col=0, context=ctx):
         module = Module.create()
-
         ctx.allow_unregistered_dialects = True
-        with InsertionPoint(module.body):
-            main = insert_main(ctx)
-            with InsertionPoint(main.body.blocks[0]):
-                insert_device(ctx)
-                qreg = insert_qreg(ctx)
-            listener = SimpleListener(ctx, module, qreg, main)
-            walker.walk(listener, tree)
-            with InsertionPoint(main.body.blocks[0]):
-                PrintStateOp()
-                DeallocOp(qreg)
-                FinalizeOp()
-                ReturnOp([])
+        listener = SimpleListener(ctx, module)
+        walker.walk(listener, tree)
 
     with open("hadamard.mlir", "w") as output_file:
         print(module, file=output_file)
     subprocess.run(["./script.sh"])
 
+class SymbolTable:
+
+    def __init__(self):
+        self.table = dict()
+
+    def _setitemunsafe(self, symbol, ref):
+        self.table[symbol] = ref
+
+    def __setitem__(self, symbol, ref):
+        if symbol in self.table:
+            raise ValueError("Redefinition of a symbol")
+        self._setitemunsafe(symbol, ref)
+
+    def __getitem__(self, symbol):
+        return self.table.get(symbol)
+
+    def __contains__(self, symbol):
+        return symbol in self.table
+
 class Frame:
 
-    def __init__(self, ip, qubits):
-        # ip is short for InsertionPoint
+    def __init__(self, ip, parent=None):
+        self._symbols = SymbolTable()
         self._ip = ip
-        self._qubits = qubits
+        self._parent = parent
+        self._params = [] 
+        self._qubits = []
+        self._locals = None
 
-    def insertQubit(self, oq3Symbol, mlirSymbol):
-        self._qubits[oq3Symbol] = mlirSymbol
+    def __enter__(self):
+        self._ip.__enter__()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self._ip.__exit__(type, value, traceback)
+
+    def __getitem__(self, symbol):
+        local = self._symbols[symbol]
+        if local:
+            return local
+        if not self._parent:
+            raise ValueError(f"Symbol {symbol} has not been defined!")
+        return self._parent[symbol]
+
+    def __setitem__(self, symbol, ref):
+        self._symbols[symbol] = ref
+
+    def __contains__(self, symbol):
+        local = symbol in self._symbols
+        if local:
+            return local
+        if not self._parent:
+            return False
+        return symbol in self._parent
+
+    def addParam(self, param):
+        self._params.append(param)
+
+    @property
+    def params(self):
+        return self._params
+
+    def addQubit(self, qubit):
+        self._qubits.append(qubit)
+
+    @property
+    def qubits(self):
+        return self._qubits
+
+class FrameStack:
+
+    def __init__(self):
+        self.stack = []
+
+    def push(self, ip):
+        self.stack.append(Frame(ip, parent=self.top()))
+
+    def pop(self):
+        return self.stack.pop()
+
+    def top(self):
+        if not self.stack:
+            return None
+        return self.stack[-1]
+
+    @property
+    def main(self):
+        return self.stack[1]
+
+    @property
+    def module(self):
+        return self.stack[0]
 
 
 class SimpleListener(qasm3ParserListener.qasm3ParserListener):
-    def __init__(self, mlir_context, mlir_module, qreg, main):
-        self._main = main
+    def __init__(self, mlir_context, mlir_module):
+        self.stack = FrameStack()
+        self.sv = None
         self._mlir_context = mlir_context
         self._mlir_module = mlir_module
-        self._qreg = qreg
-        self.idQubitMap = dict()
         self.qubitsUsed = 0
         self.userDefinedGates = dict()
-        self.currentInsertionPoint = [InsertionPoint(main.body.blocks[0])]
         super().__init__()
 
+    def enterProgram(self, ctx):
+        ip = InsertionPoint(self._mlir_module.body)
+        self.stack.push(ip)
+        with self.stack.top():
+            main = insert_main(self._mlir_context)
+        ip = InsertionPoint(main.body.blocks[0])
+        mainFunction = self.stack.push(ip)
+        self.stack.top()["main"] = mainFunction
+        with self.stack.top():
+            insert_device(self._mlir_context)
+            self.sv = insert_qreg(self._mlir_context)
+
+    def exitProgram(self, ctx):
+        with self.stack.top():
+            PrintStateOp()
+            DeallocOp(self.sv)
+            FinalizeOp()
+            ReturnOp([])
+
+        self.stack.pop() # main function
+        self.stack.pop() # module
+
+    def floatLiteralToMLIR(self, ctx):
+        with self.stack.top():
+            floatLiteral = ctx.FloatLiteral().getText()
+            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+            constant = ArithConstantOp(f64, float(floatLiteral))
+            ctx.mlir = constant.results[0]
 
     def exitLiteralExpression(self, ctx):
-        with self.currentInsertionPoint[-1]:
-            assert len(ctx.children) == 1
-            child = ctx.children[0]
-            type = child.symbol.type
-            typeName = qasm3Lexer.symbolicNames[type]
-            assert "FloatLiteral" == typeName, typeName
+        if ctx.FloatLiteral():
+            self.floatLiteralToMLIR(ctx)
+        else:
+            raise NotImplementedError("Not yet implemented!")
+
+    def unaryNegationToMLIR(self, ctx):
+        with self.stack.top():
+            value = ctx.expression().mlir
             f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
-            constant = ArithConstantOp(f64, float(child.getText()))
-            child.variable = constant
+            zero = ArithConstantOp(f64, 0.0)
+            subOp = SubFOp(zero, value)
+            ctx.mlir = subOp.results[0]
+
+    def exitUnaryExpression(self, ctx):
+        if not ctx.MINUS():
+            raise NotImplementedError("Not yet implemented!")
+        self.unaryNegationToMLIR(ctx)
 
     def exitQuantumDeclarationStatement(self, ctx):
-        with self.currentInsertionPoint[-1]:
-            qubitName = ctx.children[1].getText()
-            if qubitName in self.idQubitMap:
+        with self.stack.top() as frame:
+            qubitName = ctx.Identifier().getText()
+            if qubitName in frame:
                 raise ValueError("You are re-declaring the same symbol")
             qubit_type = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
             i64 = mlir_quantum.ir.IntegerType.get_signless(64, self._mlir_context)
             index = ArithConstantOp(i64, self.qubitsUsed).results
-            extractOp = ExtractOp(qubit_type, self._qreg, idx=index)
-            self.idQubitMap[qubitName] = extractOp.results[0]
+            extractOp = ExtractOp(qubit_type, self.sv, idx=index)
+            frame[qubitName] = extractOp.results[0]
             self.qubitsUsed += 1
 
     def enterGateStatement(self, ctx):
-        gateName = ctx.Identifier()
-        if gateName in self.userDefinedGates:
-            raise ValueError("Re-declaring gate.")
+        gateName = ctx.Identifier().getText()
+        cparams = ctx.params.children if ctx.params else []
+        qparams = ctx.qubits.children
+        retval = []
+        params = []
 
-        # We are going to need to create a new function in the module
-        self.currentInsertionPoint.append(InsertionPoint(self._mlir_module.body))
-        with self.currentInsertionPoint[-1]:
-            funcName = gateName.getText()
-            # classical params 
-            cparams = ctx.params.children if ctx.params else []
-            # qubit params
-            qparams = ctx.qubits.children
+        f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+        for cparam in cparams:
+            params.append(f64)
 
-            # And a gate never returns anything!
-            retval = []
+        qubit = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
+        for qparam in qparams:
+            params.append(qubit)
 
-            params = []
-            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
-            for cparam in cparams:
-                params.append(f64)
+        oq3params = []
+        for param in cparams + qparams:
+            oq3params.append(param.getText())
 
-            qubit = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
-            for qparam in qparams:
-                params.append(qubit)
-
-            func = FuncOp(funcName, (params, retval))
+        with self.stack.module as _globals:
+            if gateName in _globals:
+                raise ValueError(f"Re-declaring gate {gateName}.")
+            func = FuncOp(gateName, (params, retval))
             entry_block = func.add_entry_block()
+            _globals[gateName] = func
 
-            # Qubits need to be declared
-            for param, qparam in zip(entry_block.arguments, qparams):
-                if param.type != qubit:
-                    continue
-                self.idQubitMap[qparam.getText()] = param
-
-
-            self.currentInsertionPoint.append(InsertionPoint(func.body.blocks[0]))
-        self.userDefinedGates[funcName] = func
+        ip = InsertionPoint(func.body.blocks[0])
+        self.stack.push(ip)
+        with self.stack.top() as frame:
+            for mlirParam, oq3Param in zip(entry_block.arguments, oq3params):
+                frame[oq3Param] = mlirParam
+                if mlirParam.type != qubit:
+                    frame.addParam(mlirParam)
+                else:
+                    frame.addQubit(mlirParam)
 
     def exitGateStatement(self, ctx):
-        self.currentInsertionPoint.pop() # function-scope
-        self.currentInsertionPoint.pop() # mlir-module-scope
-
-    def enterScope(self, ctx):
-        assert type(ctx.parentCtx) == qasm3Parser.GateStatementContext
-
-    def exitScope(self, ctx):
-        with self.currentInsertionPoint[-1]:
-            ReturnOp([])
+        with self.stack.top():
+            ReturnOp([]) # No gate returns ever
+        self.stack.pop() # function-scope
 
     def createGPhase(self, ctx):
-        with self.currentInsertionPoint[-1]:
-            gamma = float(ctx.expressionList().expression()[0].getText())
-            how_many_qubits_in_this_scope
+        # We are going to have the assumption here
+        # that gphase is only called within gate statements.
+        # This means that gphase only applies to the arguments
+        # Which are quantum bits.
+        gamma = ctx.expressionList().expression()[0].mlir
+        with self.stack.top() as frame:
+            # We need to know how many qubits are in the scope!
+            N = len(frame.qubits)
+            qubit_t = frame.qubits[0].type
+            # We need to create an Identity matrix of size 2^Nx2^N
+            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+            zero = ArithConstantOp(f64, 0.0)
+            one = ArithConstantOp(f64, 1.0)
+            complex128 = mlir_quantum.ir.ComplexType.get(f64)
+            shape = [2**N, 2**N]
+            tensor_complex128_= mlir_quantum.ir.RankedTensorType.get(shape, complex128)
+            generateOp = GenerateOp(tensor_complex128_, [])
+            index = mlir_quantum.ir.IndexType.get()
+            Block.create_at_start(generateOp.body, [index, index])
+            with InsertionPoint(generateOp.body.blocks[0]):
+                arg0, arg1 = generateOp.body.blocks[0].arguments
+                zero_igamma = CreateOp(complex128, zero, gamma)
+                expOp = ExpOp(zero_igamma)
+                i64 = mlir_quantum.ir.IntegerType.get_signless(64)
+                eq = mlir_quantum.ir.IntegerAttr.get(i64, 0)
+                pred = CmpIOp(eq, arg0, arg1)
+                ifOp = IfOp(pred.results[0], [complex128], hasElse=True)
+                with InsertionPoint(ifOp.then_block):
+                    one_izero = CreateOp(complex128, one, zero)
+                    mulOp = MulOp(one_izero, expOp)
+                    SCFYieldOp(mulOp)
+                with InsertionPoint(ifOp.else_block):
+                    zero_izero = CreateOp(complex128, zero, zero)
+                    SCFYieldOp(zero_izero)
+                YieldOp(ifOp.results[0])
+            # Now we need to multiply the 2^n * 2^n tensor by e^i*gamma
+            matrix = generateOp.results[0]
+            QubitUnitaryOp([qubit_t] * N, matrix, frame.qubits)
+
+                
+
+
 
     def createU3(self, ctx):
-        with self.currentInsertionPoint[-1]:
+        with self.stack.top() as frame:
             gateName = ctx.children[0].getText()
             isU3 = "U" == gateName
             assert isU3, "Not U3"
 
-            theta = ctx.expressionList().children[0].children[0].variable
-            phi = ctx.expressionList().children[2].children[0].variable
-            _lambda = ctx.expressionList().children[4].children[0].variable
+            theta = ctx.expressionList().children[0].mlir
+            phi = ctx.expressionList().children[2].mlir
+            _lambda = ctx.expressionList().children[4].mlir
 
             qubitName = ctx.children[4].getText()
-            if qubitName not in self.idQubitMap:
+            if qubitName not in frame:
                 raise ValueError(f"Attempting to use non-declared qubit. {qubitName}")
 
-            qubit = self.idQubitMap[qubitName]
+            qubit = frame[qubitName]
 
             f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
             complex128 = mlir_quantum.ir.ComplexType.get(f64)
@@ -233,13 +370,14 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         elif isGphase:
             self.createGPhase(ctx)
         else:
-            with self.currentInsertionPoint[-1]:
-                assert self.userDefinedGates[gateName], f"{gateName} not yet defined!"
+            with self.stack.top() as frame:
+                if not (gateName in frame):
+                    raise ValueError(f"User defined gate {gateName} has not been defined.")
                 funcName = mlir_quantum.ir.FlatSymbolRefAttr.get(gateName)
                 qubits = ctx.gateOperandList().getText()
                 params = []
                 for qubit in qubits:
-                    params.append(self.idQubitMap[qubit])
+                    params.append(frame[qubit])
                 CallOp([], funcName, params)
 
 
