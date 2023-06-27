@@ -4,7 +4,7 @@ from openqasm_reference_parser import qasm3Lexer
 from openqasm_reference_parser import qasm3Parser, qasm3ParserListener
 import catalyst
 from mlir_quantum.dialects.func import FuncOp
-from mlir_quantum.dialects.arith import ConstantOp as ArithConstantOp, AddFOp
+from mlir_quantum.dialects.arith import ConstantOp as ArithConstantOp, AddFOp, DivFOp
 from mlir_quantum.dialects.math import CosOp, SinOp
 from mlir_quantum.dialects.complex import ExpOp, CreateOp, SubOp, MulOp, AddOp
 from mlir_quantum.dialects.quantum import AllocOp, QubitUnitaryOp, ExtractOp, PrintStateOp, DeviceOp, DeallocOp, InitializeOp, FinalizeOp
@@ -107,41 +107,38 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         zero = ArithConstantOp(f64, 0.0)
         one = ArithConstantOp(f64, 1.0)
         mone = ArithConstantOp(f64, -1.0)
+        two = ArithConstantOp(f64, 2.0)
         half = ArithConstantOp(f64, 0.5)
         zero_izero = CreateOp(complex128, zero, zero)
         one_izero = CreateOp(complex128, one, zero)
         half_izero = CreateOp(complex128, half, zero)
 
         # We need to perform arithmetic 
-        # matrix[0,0] = 1 + e^{i*theta}
-        zero_itheta = CreateOp(complex128, zero, theta)                       # itheta
-        e_to_zero_itheta = ExpOp(zero_itheta)                                 # e^{itheta}
-        one_izero_plus_e_to_zero_itheta = AddOp(one_izero, e_to_zero_itheta)  # 1 + e^{itheta}
-        m00 = MulOp(one_izero_plus_e_to_zero_itheta, half_izero)
+        # Use the definition of U3 found in pennylane.U3.html
+        # matrix[0,0] = cos(theta/2)
+        divOp = DivFOp(theta, two)
+        cosOp = CreateOp(complex128, CosOp(divOp), zero)
+        m00 = cosOp
 
-        # matrix[0,1] = -ie^{i*lambda} * (1 - e^{i*theta})
-        one_izero_sub_e_to_zero_itheta = SubOp(one_izero, e_to_zero_itheta)  # 1 - e^{itheta}
-        lambda_izero = CreateOp(complex128, _lambda, zero)                   # ilambda
-        e_to_lambda_izero = ExpOp(lambda_izero)                              # e^{ilambda}
+        # matrix[0,1] = -exp(i * lambda) * sin(theta / 2)
         zero_imone = CreateOp(complex128, zero, mone)                        # -i
-        tmp = MulOp(zero_imone, e_to_lambda_izero)                           # -i * e^{ilambda}
-        tmp2 = MulOp(tmp, one_izero_sub_e_to_zero_itheta)                    # -i * e^{ilambda} * (1 - e^{itheta})
-        m01 = MulOp(tmp2, half_izero)
+        sinOp = CreateOp(complex128, SinOp(divOp), zero)
+        zero_ilambda = CreateOp(complex128, zero, _lambda)
+        expOp = ExpOp(zero_ilambda)
+        mulOp = MulOp(zero_imone, expOp)
+        m01 = MulOp(expOp, sinOp)
     
-        # matrix[1,0] = i*e^{i*phi} * (1 - e^{i*theta})
-        phi_izero = CreateOp(complex128, phi, zero)                        # iphi
-        e_to_phi_izero = ExpOp(phi_izero)                                  # e^{iphi}
-        zero_ione = CreateOp(complex128, zero, one)                        # i
-        tmp = MulOp(zero_ione, e_to_phi_izero)                             # i * e^{iphi}
-        tmp2 = MulOp(tmp, one_izero_sub_e_to_zero_itheta)                  # i * e^{iphi} * (1 - e^{itheta})
-        m10 = MulOp(tmp2, half_izero)
+        # matrix[1,0] = exp (i * phi) * sin (theta / 2)
+        zero_iphi = CreateOp(complex128, zero, phi)
+        expOp = ExpOp(zero_iphi)
+        mulOp = MulOp(expOp, sinOp)
+        m10 = mulOp
 
-        # matrix[1,1] = 
-        lambda_izero_plus_phi_izero = AddOp(lambda_izero, phi_izero)      # ilambda + iphi
-        exp = ExpOp(lambda_izero_plus_phi_izero)                           # e^{ilambda + iphi}
-        tmp3 = MulOp(exp, one_izero_plus_e_to_zero_itheta)
-        m11 = MulOp(tmp3, half_izero)
-
+        # matrix[1,1] = exp (i * (phi + lambda)) * cos (theta / 2)
+        addOp = AddOp(zero_iphi, zero_ilambda)
+        expOp = ExpOp(addOp)
+        mulOp = MulOp(expOp, cosOp)
+        m11 = mulOp
 
         tensor_complex128_= mlir_quantum.ir.RankedTensorType.get([2, 2], complex128)
         matrix = FromElementsOp.build_generic([tensor_complex128_], [m00.results[0], m01.results[0], m10.results[0], m11.results[0]])
