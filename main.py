@@ -3,7 +3,7 @@ from antlr4 import *
 from openqasm_reference_parser import qasm3Lexer
 from openqasm_reference_parser import qasm3Parser, qasm3ParserListener
 import catalyst
-from mlir_quantum.dialects.func import FuncOp
+from mlir_quantum.dialects.func import FuncOp, ReturnOp
 from mlir_quantum.dialects.arith import ConstantOp as ArithConstantOp, AddFOp, DivFOp
 from mlir_quantum.dialects.math import CosOp, SinOp
 from mlir_quantum.dialects.complex import ExpOp, CreateOp, SubOp, MulOp, AddOp
@@ -52,6 +52,7 @@ def main(argv):
                 PrintStateOp()
                 DeallocOp(qreg)
                 FinalizeOp()
+                ReturnOp([])
         print(module)
 
 class SimpleListener(qasm3ParserListener.qasm3ParserListener):
