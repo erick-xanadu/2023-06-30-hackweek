@@ -31,7 +31,6 @@ def insert_device(ctx):
     backend_attr = mlir_quantum.ir.StringAttr.get("backend")
     val_attr = mlir_quantum.ir.StringAttr.get("lightning.qubit")
     DeviceOp(specs=mlir_quantum.ir.ArrayAttr.get([backend_attr, val_attr]))
-
  
 def main(argv):
     input_stream = FileStream(argv[1])
@@ -135,6 +134,9 @@ class FrameStack:
             return None
         return self.stack[-1]
 
+    def push_frame(self, frame):
+        self.stack.append(frame)
+
     @property
     def main(self):
         return self.stack[1]
@@ -154,6 +156,14 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         self.userDefinedGates = dict()
         super().__init__()
 
+    @property
+    def f64(self):
+        return mlir_quantum.ir.F64Type.get(self._mlir_context)
+
+    @property
+    def i64(self):
+        return mlir_quantum.ir.IntegerType.get_signless(64, self._mlir_context)
+
     def enterProgram(self, ctx):
         ip = InsertionPoint(self._mlir_module.body)
         self.stack.push(ip)
@@ -164,23 +174,53 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         self.stack.top()["main"] = mainFunction
         with self.stack.top():
             insert_device(self._mlir_context)
-            self.sv = insert_qreg(self._mlir_context)
+            #self.sv = insert_qreg(self._mlir_context)
 
     def exitProgram(self, ctx):
         with self.stack.top():
             PrintStateOp()
-            DeallocOp(self.sv)
+            #DeallocOp(self.sv)
             FinalizeOp()
             ReturnOp([])
 
         self.stack.pop() # main function
         self.stack.pop() # module
 
+
+    def exitScalarType(self, ctx):
+        if ctx.FLOAT():
+            ctx.mlir_type = self.f64
+        else:
+            raise NotImplementedError(f"Unsupported classical type {ctx.getText()}")
+
+    def exitClassicalDeclarationStatement(self, ctx):
+        identifier = ctx.Identifier().getText()
+        typeCtx = ctx.scalarType() if ctx.scalarType() else ctx.arrayType()
+        assert typeCtx, "This is expected from the grammar."
+        mlirType = typeCtx.mlir_type
+        declExprCtx = ctx.declarationExpression()
+        with self.stack.top() as frame:
+            if declExprCtx:
+                value = declExprCtx.mlir
+            else:
+                value = ArithConstantOp(mlirType, 0.0)
+            frame[identifier] = value
+
+    def enterConstDeclarationStatement(self, ctx):
+        raise NotImplementedError("Not implemented yet!")
+
     def floatLiteralToMLIR(self, ctx):
         with self.stack.top():
             floatLiteral = ctx.FloatLiteral().getText()
-            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+            f64 = self.f64
             constant = ArithConstantOp(f64, float(floatLiteral))
+            ctx.mlir = constant.results[0]
+
+    def decimalIntegerLiteralToMLIR(self, ctx):
+        with self.stack.top():
+            lit = ctx.DecimalIntegerLiteral().getText()
+            i64 = self.i64
+            constant = ArithConstantOp(i64, int(lit))
             ctx.mlir = constant.results[0]
 
     def identifierToMLIR(self, ctx):
@@ -201,13 +241,21 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             self.floatLiteralToMLIR(ctx)
         elif ctx.Identifier():
             self.identifierToMLIR(ctx)
+        elif ctx.DecimalIntegerLiteral():
+            self.decimalIntegerLiteralToMLIR(ctx)
+        else:
+            raise NotImplementedError("Not yet implemented!")
+
+    def exitDeclarationExpression(self, ctx):
+        if ctx.expression():
+            ctx.mlir = ctx.expression().mlir
         else:
             raise NotImplementedError("Not yet implemented!")
 
     def unaryNegationToMLIR(self, ctx):
         with self.stack.top():
             value = ctx.expression().mlir
-            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+            f64 = self.f64
             zero = ArithConstantOp(f64, 0.0)
             subOp = SubFOp(zero, value)
             ctx.mlir = subOp.results[0]
@@ -217,15 +265,28 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             raise NotImplementedError("Not yet implemented!")
         self.unaryNegationToMLIR(ctx)
 
+    def exitDesignator(self, ctx):
+        exprCtx = ctx.expression()
+        ctx.mlir = exprCtx.mlir
+
+    def exitQubitType(self, ctx):
+        #designatorCtx = ctx.designator()
+        #shape = [designatorCtx.mlir] if designatorCtx else []
+        #qubit_type = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
+        #qtype = mlir_quantum.ir.OpaqueType.get("quantum", "reg") if shape else qubit_type
+        #i64 = self.i64
+        pass
+
     def exitQuantumDeclarationStatement(self, ctx):
+        qubitName = ctx.Identifier().getText()
         with self.stack.top() as frame:
-            qubitName = ctx.Identifier().getText()
             if qubitName in frame:
                 raise ValueError("You are re-declaring the same symbol")
+            qreg = insert_qreg(self._mlir_context)
             qubit_type = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
-            i64 = mlir_quantum.ir.IntegerType.get_signless(64, self._mlir_context)
-            index = ArithConstantOp(i64, self.qubitsUsed).results
-            extractOp = ExtractOp(qubit_type, self.sv, idx=index)
+            i64 = self.i64
+            index = ArithConstantOp(i64, 0).results[0]
+            extractOp = ExtractOp(qubit_type, qreg, idx=index)
             frame[qubitName] = extractOp.results[0]
             self.qubitsUsed += 1
 
@@ -237,7 +298,7 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         retval = []
         params = []
 
-        f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+        f64 = self.f64
         if paramsCtx:
             for cparam in paramsCtx.Identifier():
                 oq3params.append(cparam.getText())
@@ -281,7 +342,7 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             N = len(frame.qubits)
             qubit_t = frame.qubits[0].type
             # We need to create an Identity matrix of size 2^Nx2^N
-            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+            f64 = self.f64
             zero = ArithConstantOp(f64, 0.0)
             one = ArithConstantOp(f64, 1.0)
             complex128 = mlir_quantum.ir.ComplexType.get(f64)
@@ -328,7 +389,7 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
 
             qubit = frame[qubitName]
 
-            f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
+            f64 = self.f64
             complex128 = mlir_quantum.ir.ComplexType.get(f64)
             zero = ArithConstantOp(f64, 0.0)
             one = ArithConstantOp(f64, 1.0)
@@ -341,25 +402,12 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             half_izero = CreateOp(complex128, half, zero)
             zero_imone = CreateOp(complex128, zero, mone)
 
-            # We need to perform arithmetic 
-            # Use the definition of U3 found in pennylane.U3.html
-            # matrix[0,0] = cos(theta/2)
-            # divOp = DivFOp(theta, two)
-            # cosOp = CreateOp(complex128, CosOp(divOp), zero)
-            # m00 = cosOp
             itheta = CreateOp(complex128, zero, theta)
             e_itheta = ExpOp(itheta)
             addOp = AddOp(one_izero, e_itheta)
             tmp1 = MulOp(half_izero, addOp)
             m00 = tmp1
 
-            # matrix[0,1] = -exp(i * lambda) * sin(theta / 2)
-            #zero_imone = CreateOp(complex128, zero, mone)
-            #sinOp = CreateOp(complex128, SinOp(divOp), zero)
-            #zero_ilambda = CreateOp(complex128, zero, _lambda)
-            #expOp = ExpOp(zero_ilambda)
-            #mulOp = MulOp(zero_imone, expOp)
-            #m01 = MulOp(expOp, sinOp)
             subOp = SubOp(one_izero, e_itheta)
             ilambda = CreateOp(complex128, zero, _lambda)
             e_ilambda = ExpOp(ilambda)
@@ -368,11 +416,6 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             tmp2 = MulOp(tmp1, subOp)
             m01 = tmp2
         
-            # matrix[1,0] = exp (i * phi) * sin (theta / 2)
-            #zero_iphi = CreateOp(complex128, zero, phi)
-            #expOp = ExpOp(zero_iphi)
-            #mulOp = MulOp(expOp, sinOp)
-            #m10 = mulOp
             iphi = CreateOp(complex128, zero, phi)
             e_iphi = ExpOp(iphi)
             ie_iphi = MulOp(zero_ione, e_iphi)
@@ -381,11 +424,6 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             m10 = tmp1
 
 
-            # matrix[1,1] = exp (i * (phi + lambda)) * cos (theta / 2)
-            #addOp = AddOp(zero_iphi, zero_ilambda)
-            #expOp = ExpOp(addOp)
-            #mulOp = MulOp(expOp, cosOp)
-            #m11 = mulOp
             iphi_plus_lambda = AddOp(ilambda, iphi)
             e_iphi_plus_lambda = ExpOp(iphi_plus_lambda)
             tmp = MulOp(e_iphi_plus_lambda, half_izero)
@@ -395,7 +433,6 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             tensor_complex128_= mlir_quantum.ir.RankedTensorType.get([2, 2], complex128)
             matrix = FromElementsOp.build_generic([tensor_complex128_], [m00.results[0], m01.results[0], m10.results[0], m11.results[0]])
 
-            # QubitUnitaryOp()
             QubitUnitaryOp([qubit.type], matrix.results, [qubit])
 
 
@@ -419,8 +456,9 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
                 funcName = mlir_quantum.ir.FlatSymbolRefAttr.get(gateName)
                 params = []
                 exprListCtx = ctx.expressionList()
-                for e in exprListCtx.expression():
-                    params.append(e.mlir)
+                if exprListCtx:
+                    for e in exprListCtx.expression():
+                        params.append(e.mlir)
                 gateOperandCtx = ctx.gateOperandList()
                 for idx, qubit in enumerate(gateOperandCtx.gateOperand()):
                     if idx == 0 and is_ctrl:
