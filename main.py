@@ -231,22 +231,22 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
 
     def enterGateStatement(self, ctx):
         gateName = ctx.Identifier().getText()
-        cparams = ctx.params.children if ctx.params else []
-        qparams = ctx.qubits.children
+        paramsCtx = ctx.params
+        qubitsCtx = ctx.qubits
+        oq3params = []
         retval = []
         params = []
 
         f64 = mlir_quantum.ir.F64Type.get(self._mlir_context)
-        for cparam in cparams:
-            params.append(f64)
+        if paramsCtx:
+            for cparam in paramsCtx.Identifier():
+                oq3params.append(cparam.getText())
+                params.append(f64)
 
         qubit = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
-        for qparam in qparams:
+        for qparam in qubitsCtx.Identifier():
+            oq3params.append(qparam.getText())
             params.append(qubit)
-
-        oq3params = []
-        for param in cparams + qparams:
-            oq3params.append(param.getText())
 
         with self.stack.module as _globals:
             if gateName in _globals:
@@ -309,8 +309,6 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             # Now we need to multiply the 2^n * 2^n tensor by e^i*gamma
             matrix = generateOp.results[0]
             QubitUnitaryOp([qubit_t] * N, matrix, frame.qubits)
-
-                
 
 
 
@@ -414,14 +412,21 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             with self.stack.top() as frame:
                 if not (gateName in frame):
                     raise ValueError(f"User defined gate {gateName} has not been defined.")
+                gateModifierCtx = ctx.gateModifier()
+                is_ctrl = False if not gateModifierCtx else gateModifierCtx[0].CTRL()
+                control = []
+
                 funcName = mlir_quantum.ir.FlatSymbolRefAttr.get(gateName)
-                qubits = ctx.gateOperandList().getText()
                 params = []
                 exprListCtx = ctx.expressionList()
                 for e in exprListCtx.expression():
                     params.append(e.mlir)
-                for qubit in qubits:
-                    params.append(frame[qubit])
+                gateOperandCtx = ctx.gateOperandList()
+                for idx, qubit in enumerate(gateOperandCtx.gateOperand()):
+                    if idx == 0 and is_ctrl:
+                        control.append(frame[qubit.getText()])
+                        continue
+                    params.append(frame[qubit.getText()])
                 CallOp([], funcName, params)
 
 
