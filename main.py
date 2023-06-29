@@ -1,16 +1,23 @@
 import sys
-import subprocess
+
 from antlr4 import *
 from openqasm_reference_parser import qasm3Lexer
 from openqasm_reference_parser import qasm3Parser, qasm3ParserListener
 import catalyst
+from mlir_quantum import ir
+from mlir_quantum import runtime
+from mlir_quantum.dialects import arith
+from mlir_quantum.dialects import bufferization
+from mlir_quantum.dialects import builtin
+import subprocess
 from mlir_quantum.dialects.func import FuncOp, ReturnOp, CallOp
 from mlir_quantum.dialects.arith import ConstantOp as ArithConstantOp, AddFOp, DivFOp, SubFOp, CmpIOp
 from mlir_quantum.dialects.math import CosOp, SinOp
 from mlir_quantum.dialects.complex import ExpOp, CreateOp, SubOp, MulOp, AddOp
 from mlir_quantum.dialects.quantum import AllocOp, QubitUnitaryOp, ExtractOp, PrintStateOp, DeviceOp, DeallocOp, InitializeOp, FinalizeOp
-from mlir_quantum.dialects.tensor import FromElementsOp, GenerateOp, YieldOp, SplatOp
+from mlir_quantum.dialects.tensor import FromElementsOp, GenerateOp, YieldOp, SplatOp, EmptyOp
 from mlir_quantum.dialects.scf import IfOp, YieldOp as SCFYieldOp
+from mlir_quantum.dialects.linalg import MatmulOp, YieldOp as LinalgYieldOp
 
 import mlir_quantum
 from mlir_quantum.ir import Context, Module, InsertionPoint, Location, Block
@@ -33,7 +40,7 @@ def insert_device(ctx):
     DeviceOp(specs=mlir_quantum.ir.ArrayAttr.get([backend_attr, val_attr]))
  
 def main(argv):
-    input_stream = FileStream(argv[1])
+    input_stream = FileStream(argv[1], encoding='utf-8')
     lexer = qasm3Lexer(input_stream)
     stream = CommonTokenStream(lexer)
     parser = qasm3Parser(stream)
@@ -48,6 +55,7 @@ def main(argv):
     with open("hadamard.mlir", "w") as output_file:
         print(module, file=output_file)
     subprocess.run(["./script.sh"])
+
 
 class SymbolTable:
 
@@ -77,6 +85,7 @@ class Frame:
         self._params = [] 
         self._qubits = []
         self._locals = None
+        self._currentUnitary = None
 
     def __enter__(self):
         self._ip.__enter__()
@@ -145,7 +154,6 @@ class FrameStack:
     def module(self):
         return self.stack[0]
 
-
 class SimpleListener(qasm3ParserListener.qasm3ParserListener):
     def __init__(self, mlir_context, mlir_module):
         self.stack = FrameStack()
@@ -164,6 +172,10 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
     def i64(self):
         return mlir_quantum.ir.IntegerType.get_signless(64, self._mlir_context)
 
+    @property
+    def complex128(self):
+        return mlir_quantum.ir.ComplexType.get(self.f64)
+
     def enterProgram(self, ctx):
         ip = InsertionPoint(self._mlir_module.body)
         self.stack.push(ip)
@@ -174,12 +186,11 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         self.stack.top()["main"] = mainFunction
         with self.stack.top():
             insert_device(self._mlir_context)
-            #self.sv = insert_qreg(self._mlir_context)
+        self.create_builtin_U3(ctx)
 
     def exitProgram(self, ctx):
         with self.stack.top():
             PrintStateOp()
-            #DeallocOp(self.sv)
             FinalizeOp()
             ReturnOp([])
 
@@ -269,19 +280,11 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
         exprCtx = ctx.expression()
         ctx.mlir = exprCtx.mlir
 
-    def exitQubitType(self, ctx):
-        #designatorCtx = ctx.designator()
-        #shape = [designatorCtx.mlir] if designatorCtx else []
-        #qubit_type = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
-        #qtype = mlir_quantum.ir.OpaqueType.get("quantum", "reg") if shape else qubit_type
-        #i64 = self.i64
-        pass
-
     def exitQuantumDeclarationStatement(self, ctx):
         qubitName = ctx.Identifier().getText()
         with self.stack.top() as frame:
             if qubitName in frame:
-                raise ValueError("You are re-declaring the same symbol")
+                raise ValueError(f"You are re-declaring the same symbol {qubitName}")
             qreg = insert_qreg(self._mlir_context)
             qubit_type = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
             i64 = self.i64
@@ -309,6 +312,8 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             oq3params.append(qparam.getText())
             params.append(qubit)
 
+        retval = [self.getIdentityNType(len(qubitsCtx.Identifier()))]
+
         with self.stack.module as _globals:
             if gateName in _globals:
                 raise ValueError(f"Re-declaring gate {gateName}.")
@@ -326,68 +331,65 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
                 else:
                     frame.addQubit(mlirParam)
 
-    def exitGateStatement(self, ctx):
-        with self.stack.top():
-            ReturnOp([]) # No gate returns ever
-        self.stack.pop() # function-scope
+                frame._currentUnitary = self.IdentityN(len(frame.qubits))
 
-    def createGPhase(self, ctx):
-        # We are going to have the assumption here
-        # that gphase is only called within gate statements.
-        # This means that gphase only applies to the arguments
-        # Which are quantum bits.
-        gamma = ctx.expressionList().expression()[0].mlir
+    def getIdentityNType(self, N):
+            shape = [2**N, 2**N]
+            return mlir_quantum.ir.RankedTensorType.get(shape, self.complex128)
+
+    def IdentityN(self, N):
         with self.stack.top() as frame:
-            # We need to know how many qubits are in the scope!
-            N = len(frame.qubits)
-            qubit_t = frame.qubits[0].type
-            # We need to create an Identity matrix of size 2^Nx2^N
+            i64 = self.i64
             f64 = self.f64
+            complex128 = mlir_quantum.ir.ComplexType.get(f64)
+
             zero = ArithConstantOp(f64, 0.0)
             one = ArithConstantOp(f64, 1.0)
-            complex128 = mlir_quantum.ir.ComplexType.get(f64)
+            zero_izero = CreateOp(complex128, zero, zero)
+            one_izero = CreateOp(complex128, one, zero)
+
             shape = [2**N, 2**N]
             tensor_complex128_= mlir_quantum.ir.RankedTensorType.get(shape, complex128)
+
             generateOp = GenerateOp(tensor_complex128_, [])
             index = mlir_quantum.ir.IndexType.get()
             Block.create_at_start(generateOp.body, [index, index])
+
             with InsertionPoint(generateOp.body.blocks[0]):
                 arg0, arg1 = generateOp.body.blocks[0].arguments
-                zero_igamma = CreateOp(complex128, zero, gamma)
-                expOp = ExpOp(zero_igamma)
-                i64 = mlir_quantum.ir.IntegerType.get_signless(64)
                 eq = mlir_quantum.ir.IntegerAttr.get(i64, 0)
                 pred = CmpIOp(eq, arg0, arg1)
                 ifOp = IfOp(pred.results[0], [complex128], hasElse=True)
                 with InsertionPoint(ifOp.then_block):
-                    one_izero = CreateOp(complex128, one, zero)
-                    mulOp = MulOp(one_izero, expOp)
-                    SCFYieldOp(mulOp)
+                    SCFYieldOp(one_izero)
                 with InsertionPoint(ifOp.else_block):
-                    zero_izero = CreateOp(complex128, zero, zero)
                     SCFYieldOp(zero_izero)
                 YieldOp(ifOp.results[0])
-            # Now we need to multiply the 2^n * 2^n tensor by e^i*gamma
+
             matrix = generateOp.results[0]
-            QubitUnitaryOp([qubit_t] * N, matrix, frame.qubits)
+            return matrix
 
+    def create_builtin_U3(self, ctx):
+        name = "__builtin_U"
+        f64 = self.f64
+        qubit = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
+        paramTypes = [f64, f64, f64, qubit]
+        shape = [2, 2]
+        complex128 = mlir_quantum.ir.ComplexType.get(f64)
+        tensor_complex128_= mlir_quantum.ir.RankedTensorType.get(shape, complex128)
+        retval = tensor_complex128_
 
+        with self.stack.module as _globals:
+            if name in _globals:
+                raise ValueError(f"Re-declaring gate {gateName}.")
+            func = FuncOp(name, (paramTypes, [retval]))
+            entry_block = func.add_entry_block()
+            _globals[name] = func
 
-    def createU3(self, ctx):
+        ip = InsertionPoint(func.body.blocks[0])
+        self.stack.push(ip)
         with self.stack.top() as frame:
-            gateName = ctx.children[0].getText()
-            isU3 = "U" == gateName
-            assert isU3, "Not U3"
-
-            theta = ctx.expressionList().children[0].mlir
-            phi = ctx.expressionList().children[2].mlir
-            _lambda = ctx.expressionList().children[4].mlir
-
-            qubitName = ctx.children[4].getText()
-            if qubitName not in frame:
-                raise ValueError(f"Attempting to use non-declared qubit. {qubitName}")
-
-            qubit = frame[qubitName]
+            theta, phi, _lambda, qubit = entry_block.arguments
 
             f64 = self.f64
             complex128 = mlir_quantum.ir.ComplexType.get(f64)
@@ -433,24 +435,77 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
             tensor_complex128_= mlir_quantum.ir.RankedTensorType.get([2, 2], complex128)
             matrix = FromElementsOp.build_generic([tensor_complex128_], [m00.results[0], m01.results[0], m10.results[0], m11.results[0]])
 
-            QubitUnitaryOp([qubit.type], matrix.results, [qubit])
+            ReturnOp(matrix.results)
+        self.stack.pop()
+
+
+    def exitGateStatement(self, ctx):
+        with self.stack.top() as frame:
+            import pdb
+            pdb.set_trace()
+            ReturnOp([frame._currentUnitary])
+        self.stack.pop() # function-scope
+
+    def createGPhase(self, ctx):
+        # We are going to have the assumption here
+        # that gphase is only called within gate statements.
+        # This means that gphase only applies to the arguments
+        # Which are quantum bits.
+        gamma = ctx.expressionList().expression()[0].mlir
+        with self.stack.top() as frame:
+            # We need to know how many qubits are in the scope!
+            N = len(frame.qubits)
+            qubit_t = frame.qubits[0].type
+            # We need to create an Identity matrix of size 2^Nx2^N
+            f64 = self.f64
+            zero = ArithConstantOp(f64, 0.0)
+            one = ArithConstantOp(f64, 1.0)
+            complex128 = mlir_quantum.ir.ComplexType.get(f64)
+            shape = [2**N, 2**N]
+            tensor_complex128_= mlir_quantum.ir.RankedTensorType.get(shape, complex128)
+            generateOp = GenerateOp(tensor_complex128_, [])
+            index = mlir_quantum.ir.IndexType.get()
+            Block.create_at_start(generateOp.body, [index, index])
+            with InsertionPoint(generateOp.body.blocks[0]):
+                arg0, arg1 = generateOp.body.blocks[0].arguments
+                zero_igamma = CreateOp(complex128, zero, gamma)
+                expOp = ExpOp(zero_igamma)
+                i64 = mlir_quantum.ir.IntegerType.get_signless(64)
+                eq = mlir_quantum.ir.IntegerAttr.get(i64, 0)
+                pred = CmpIOp(eq, arg0, arg1)
+                ifOp = IfOp(pred.results[0], [complex128], hasElse=True)
+                with InsertionPoint(ifOp.then_block):
+                    one_izero = CreateOp(complex128, one, zero)
+                    mulOp = MulOp(one_izero, expOp)
+                    SCFYieldOp(mulOp)
+                with InsertionPoint(ifOp.else_block):
+                    zero_izero = CreateOp(complex128, zero, zero)
+                    SCFYieldOp(zero_izero)
+                YieldOp(ifOp.results[0])
+            # Now we need to multiply the 2^n * 2^n tensor by e^i*gamma
+            matrix = generateOp.results[0]
+            QubitUnitaryOp([qubit_t] * N, matrix, frame.qubits)
+
 
 
     def exitGateCallStatement(self, ctx):
         gateName = ctx.Identifier().getText() if ctx.Identifier() else ctx.GPHASE().getText()
 
-        isU3 = "U" == gateName
         isGphase = "gphase" == gateName
-        if isU3:
-            self.createU3(ctx)
-        elif isGphase:
+        if isGphase:
             self.createGPhase(ctx)
         else:
             with self.stack.top() as frame:
                 if not (gateName in frame):
                     raise ValueError(f"User defined gate {gateName} has not been defined.")
                 gateModifierCtx = ctx.gateModifier()
+                if gateModifierCtx:
+                    gateModifierCtx.reverse()
+
                 is_ctrl = False if not gateModifierCtx else gateModifierCtx[0].CTRL()
+                is_pow = False if not gateModifierCtx else gateModifierCtx[0].POW()
+
+                power = []
                 control = []
 
                 funcName = mlir_quantum.ir.FlatSymbolRefAttr.get(gateName)
@@ -460,12 +515,31 @@ class SimpleListener(qasm3ParserListener.qasm3ParserListener):
                     for e in exprListCtx.expression():
                         params.append(e.mlir)
                 gateOperandCtx = ctx.gateOperandList()
+                qubits = []
                 for idx, qubit in enumerate(gateOperandCtx.gateOperand()):
                     if idx == 0 and is_ctrl:
                         control.append(frame[qubit.getText()])
                         continue
                     params.append(frame[qubit.getText()])
-                CallOp([], funcName, params)
+                    qubits.append(frame[qubit.getText()])
+                mlir_function = frame[str(funcName)[1:]]
+                results = mlir_function.type.results
+                callOp = CallOp(results, funcName, params)
+                if frame._currentUnitary:
+                    emptyOp = EmptyOp([2, 2], self.complex128)
+                    op = MatmulOp([callOp.results[0], frame._currentUnitary], outputs=[emptyOp.results[0]], results=[emptyOp.results[0].type])
+                    entry_block = Block.create_at_start(op.regions[0], [self.complex128, self.complex128, self.complex128])
+                    
+                    with InsertionPoint(entry_block):
+                        a, b, c = entry_block.arguments
+                        d = MulOp(a, b)
+                        e = AddOp(c, d)
+                        LinalgYieldOp(e)
+
+                    frame._currentUnitary = op.results[0]
+                else: # We are in the global scope and can actually apply QubitUnitaryOp
+                    qubit_type = mlir_quantum.ir.OpaqueType.get("quantum", "bit")
+                    QubitUnitaryOp([qubit.type for qubit in qubits], callOp.results, qubits)
 
 
         
