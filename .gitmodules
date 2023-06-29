@@ -1,0 +1,6 @@
+[submodule "openqasm"]
+	path = openqasm
+	url = git@github.com:erick-xanadu/openqasm.git
+[submodule "catalyst"]
+	path = catalyst
+	url = git@github.com:erick-xanadu/catalyst.git
