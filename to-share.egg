@@ -1,0 +1,524 @@
+
+
+(datatype Sym
+        (Num i64)
+        (Float f64)
+        (Label String)
+        (Add Sym Sym)
+        (Minus Sym Sym)
+        (Mul Sym Sym)
+        (Div Sym Sym)
+
+        (EmptyS)
+        (ListS Sym Sym))
+
+(datatype G
+        (S)
+        (T)
+        (SX)
+        (PauliX)
+        (PauliY)
+        (PauliZ)
+        (Hadamard)
+        (CY)
+        (ECR)
+        (CNOT)
+        (ISWAP)
+        (SISWAP)
+        (Toffoli)
+        (RX)
+        (RY)
+        (RZ)
+        (PhaseShift)
+        (SWAP)
+        (ControlledPhaseShift)
+        (IsingXX)
+        (IsingXY)
+        (IsingZZ)
+        (CRX)
+        (CRY)
+        (CRZ)
+        (PSWAP)
+        (FermionicSWAP :cost 500)
+        (SingleExcitation :cost 500)
+        (SingleExcitationM :cost 500)
+        (SingleExcitationP :cost 500)
+        (DoubleExcitation :cost 500)
+        (DoubleExcitationP :cost 500)
+        (DoubleExcitationM :cost 500)
+        (OrbitalRotation :cost 500)
+        (Controlled)
+        (Adjoint)
+        (MultiRZ)
+        (Identity)
+        (MIdentity)
+        (Exp)
+        (Rot)
+        (PauliRot))
+
+(datatype Gate
+
+        ; Name          w0, w1, w2
+        ;----------------------------
+        (W G Sym)
+        (WW G Sym Sym)
+        (WWW G Sym Sym Sym)
+
+        (PW G Sym Sym)
+        (PWW G Sym Sym Sym)
+        (PWWW G Sym Sym Sym Sym)
+        (PWWWW G Sym Sym Sym Sym Sym)
+
+        (PPW G Sym Sym Sym)
+        (PPWW G Sym Sym Sym Sym)
+        (PPWWW G Sym Sym Sym Sym Sym)
+
+        (PPPW G Sym Sym Sym Sym)
+
+        ; Name   
+        ;------------------------
+        (GW G Gate Sym)
+        (GP G Gate Sym)
+        (WM G Sym)
+
+        ; List, useful for multi-qubit gates
+        (EmptyG)
+        (ListG Gate Gate))
+
+
+
+(define pi (Label "pi"))
+(define mpi (Minus (Num 0) pi))
+(define piDiv2 (Div pi (Num 2)))
+(define piDiv4 (Div pi (Num 4)))
+(define mpiDiv2 (Div mpi (Num 2)))
+
+(rewrite (Add (Num a) (Num b)) (Num (+ a b)))
+(rewrite (Mul (Num a) (Num b)) (Num (* a b)))
+
+
+(birewrite
+        (ListG (PWW (IsingXX) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (RX) phi w0)
+        (ListG (WW (CNOT) w0 w1) tail))))
+
+
+(birewrite
+        (ListG (PWW (IsingXY) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (GW (Controlled) (W (PauliY) w1) w0)
+        (ListG (PW (RY) phi w0)
+        (ListG (GW (Controlled) (W (PauliY) w1) w0) tail))))
+
+(birewrite
+        (ListG (PWW (IsingZZ) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (RZ) phi w1)
+        (ListG (WW (CNOT) w0 w1) tail))))
+
+
+
+(birewrite
+        (ListG (WW (CY) w0 w1) tail)
+;----------------------------------------
+        (ListG (PWW (CRY) pi w0 w1)
+        (ListG (W (S) w0) tail)))
+
+
+
+(birewrite
+        (ListG (PPW (PauliRot) phi (Label "X") w0) tail)
+;----------------------------------------
+        (ListG (W (Hadamard) w0)
+        (ListG (PW (MultiRZ) phi w0)
+        (ListG (W (Hadamard) w0) tail))))
+
+(birewrite
+        (ListG (PPW (PauliRot) phi (Label "Y") w0) tail)
+;----------------------------------------
+        (ListG (PW (RX) piDiv2 w0)
+        (ListG (PW (MultiRZ) phi w0)
+        (ListG (PW (RX) mpiDiv2 w0) tail))))
+
+(birewrite
+        (ListG (PPW (PauliRot) phi (Label "Z") w0) tail)
+;----------------------------------------
+        (ListG (PW (MultiRZ) phi w0) tail))
+
+(birewrite
+        (ListG (WWW (Toffoli) w0 w1 w2) tail)
+;----------------------------------------
+        (ListG (W (Hadamard) w2)
+        (ListG (WW (CNOT) w1 w2)
+        (ListG (GW (Adjoint) (W (T) w2) (EmptyS)) ; no wires?
+        (ListG (WW (CNOT) w0 w2)
+        (ListG (W (T) w2)
+        (ListG (WW (CNOT) w1 w2)
+        (ListG (GW (Adjoint) (W (T) w2) (EmptyS)) ; no wires?
+        (ListG (WW (CNOT) w0 w2)
+        (ListG (W (T) w2)
+        (ListG (W (T) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (W (Hadamard) w2)
+        (ListG (W (T) w0)
+        (ListG (GW (Adjoint) (W (T) w1) (EmptyS)) ; no wires?
+        (ListG (WW (CNOT) w0 w1) tail))))))))))))))))
+
+
+(birewrite
+        (ListG (WW (ISWAP) w0 w1) tail)
+;----------------------------------------
+        (ListG (W (S) w0)
+        (ListG (W (S) w1)
+        (ListG (W (Hadamard) w0)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (WW (CNOT) w1 w0)
+        (ListG (W (Hadamard) w1) tail)))))))
+
+(birewrite
+        (ListG (WW (SISWAP) w0 w1) tail)
+;----------------------------------------
+        (ListG (W (SX) w0)
+        (ListG (PW (RZ) piDiv2 w0)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (W (SX) w0)
+        (ListG (PW (RZ) (Div (Mul (Num 7) pi) (Num 4)) w0)
+        (ListG (W (SX) w0)
+        (ListG (PW (RZ) piDiv2 w0)
+        (ListG (W (SX) w1)
+        (ListG (PW (RZ) (Div (Mul (Num 7) pi) (Num 4)) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (W (SX) w0)
+        (ListG (W (SX) w1) tail)))))))))))))
+
+(birewrite
+        (ListG (PWW (ControlledPhaseShift) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) (Div phi (Num 2)) w0)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (PhaseShift) (Div (Minus (Num 0) phi) (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (PhaseShift) (Div phi (Num 2)) w1) tail))))))
+
+(birewrite
+        (ListG (WW (ECR) w0 w1) tail)
+;----------------------------------------
+        (ListG (W (PauliZ) w0)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (W (SX) w1)
+        (ListG (PW (RX) piDiv2 w0)
+        (ListG (PW (RY) piDiv2 w0)
+        (ListG (PW (RX) piDiv2 w0) tail)))))))
+
+
+(birewrite
+        (ListG (W (S) w0) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) piDiv2 w0) tail))
+
+
+(birewrite
+        (ListG (W (T) w0) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) piDiv4 w0) tail))
+
+(birewrite
+        (ListG (W (SX) w0) tail)
+;----------------------------------------
+        (ListG (PW (RZ) piDiv2 w0)
+        (ListG (PW (RY) piDiv2 w0)
+        (ListG (PW (RZ) mpi w0)
+        (ListG (PW (PhaseShift) mpiDiv2 w0) tail)))))
+
+(birewrite
+        (ListG (W (PauliX) w0) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) piDiv2 w0)
+        (ListG (PW (RX) pi w0)
+        (ListG (PW (PhaseShift) piDiv2 w0) tail))))
+
+(birewrite
+        (ListG (W (PauliY) w0) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) piDiv2 w0)
+        (ListG (PW (RY) pi w0)
+        (ListG (PW (PhaseShift) piDiv2 w0) tail))))
+
+(birewrite
+        (ListG (W (PauliZ) w0) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) pi w0) tail))
+
+(birewrite
+        (ListG (W (Hadamard) w0) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) piDiv2 w0)
+        (ListG (PW (RX) piDiv2 w0)
+        (ListG (PW (PhaseShift) piDiv2 w0) tail))))
+
+(birewrite
+        (ListG (PWW (CRX) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (PW (RZ) piDiv2 w1)
+        (ListG (PW (RY) (Div phi (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (RY) (Div (Minus (Num 0) phi) (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (RZ) mpiDiv2 w1) tail)))))))
+
+
+
+(birewrite
+        (ListG (PWW (CRY) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (PW (RY) (Div phi (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (RY) (Div (Minus (Num 0) phi) (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1) tail)))))
+
+
+(birewrite
+        (ListG (PWW (CRZ) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (PW (PhaseShift) (Div phi (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (PhaseShift) (Div (Minus (Num 0) phi) (Num 2)) w1)
+        (ListG (WW (CNOT) w0 w1) tail)))))
+
+
+(birewrite
+        (ListG (PPPW (Rot) phi theta omega w0) tail)
+;----------------------------------------
+        (ListG (PW (RZ) phi w0)
+        (ListG (PW (RY) theta w0)
+        (ListG (PW (RZ) omega w0) tail))))
+
+(birewrite
+        (ListG (WW (SWAP) w0 w1) tail)
+;----------------------------------------
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (WW (CNOT) w1 w0)
+        (ListG (WW (CNOT) w0 w1) tail))))
+
+
+(birewrite
+        (ListG (PWW (PSWAP) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (WW (SWAP) w0 w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (PhaseShift) phi w1)
+        (ListG (WW (CNOT) w0 w1) tail)))))
+
+
+(birewrite
+        (ListG (PWW (SingleExcitation) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (GW (Adjoint) (W (T) w0) (EmptyS)) ; no wires?
+        (ListG (W (Hadamard) w0)
+        (ListG (W (S) w0)
+        (ListG (GW (Adjoint) (W (T) w1) (EmptyS)) ; no wires?
+        (ListG (GW (Adjoint) (W (S) w1) (EmptyS)) ; no wires?
+        (ListG (W (Hadamard) w1)
+        (ListG (WW (CNOT) w1 w0)
+        (ListG (PW (RZ) (Div (Minus (Num 0) phi) (Num 2)) w0)
+        (ListG (PW (RY) (Div phi (Num 2)) w1)
+        (ListG (WW (CNOT) w1 w0)
+        (ListG (GW (Adjoint) (W (S) w0) (EmptyS)) ; no wires?
+        (ListG (W (Hadamard) w0)
+        (ListG (W (T) w0)
+        (ListG (W (Hadamard) w1)
+        (ListG (W (S) w1)
+        (ListG (W (T) w1) tail)))))))))))))))))
+
+(birewrite
+        (ListG (PWW (SingleExcitationM) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (W (PauliX) w0)
+        (ListG (W (PauliX) w1)
+        (ListG (PWW (ControlledPhaseShift) (Div (Minus (Num 0) phi) (Num 2)) w1 w0)
+        (ListG (W (PauliX) w0)
+        (ListG (W (PauliX) w1)
+        (ListG (PWW (ControlledPhaseShift) (Div (Minus (Num 0) phi) (Num 2)) w0 w1)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PWW (CRY) phi w1 w0)
+        (ListG (WW (CNOT) w0 w1) tail))))))))))
+
+(birewrite
+        (ListG (PWW (SingleExcitationP) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (W (PauliX) w0)
+        (ListG (W (PauliX) w1)
+        (ListG (PWW (ControlledPhaseShift) (Div phi (Num 2)) w1 w0)
+        (ListG (W (PauliX) w0)
+        (ListG (W (PauliX) w1)
+        (ListG (PWW (ControlledPhaseShift) (Div phi (Num 2)) w0 w1)
+        (ListG (PWW (CRY) phi w1 w0)
+        (ListG (WW (CNOT) w0 w1) tail)))))))))
+
+
+(birewrite
+        (ListG (PWWWW (DoubleExcitation) phi w0 w1 w2 w3) tail)
+;----------------------------------------
+        (ListG (WW (CNOT) w2 w3)
+        (ListG (WW (CNOT) w0 w2)
+        (ListG (W (Hadamard) w3)
+        (ListG (W (Hadamard) w0)
+        (ListG (WW (CNOT) w2 w3)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (PW (RY) (Div phi (Num 8)) w1)
+        (ListG (PW (RY) (Div (Minus (Num 0) phi) (Num 8)) w0)
+        (ListG (WW (CNOT) w0 w3)
+        (ListG (W (Hadamard) w3)
+        (ListG (WW (CNOT) w3 w1)
+        (ListG (PW (RY) (Div phi (Num 8)) w1)
+        (ListG (PW (RY) (Div (Minus (Num 0) phi) (Num 8)) w0)
+        (ListG (WW (CNOT) w2 w1)
+        (ListG (WW (CNOT) w2 w0)
+        (ListG (PW (RY) (Div (Minus (Num 0) phi) (Num 8)) w1)
+        (ListG (PW (RY) (Div phi (Num 8)) w0)
+        (ListG (WW (CNOT) w3 w1)
+        (ListG (W (Hadamard) w3)
+        (ListG (WW (CNOT) w0 w3)
+        (ListG (PW (RY) (Div (Minus (Num 0) phi) (Num 8)) w1)
+        (ListG (PW (RY) (Div phi (Num 8)) w0)
+        (ListG (WW (CNOT) w0 w1)
+        (ListG (WW (CNOT) w2 w0)
+        (ListG (W (Hadamard) w0)
+        (ListG (W (Hadamard) w3)
+        (ListG (WW (CNOT) w0 w2)
+        (ListG (WW (CNOT) w2 w3) tail)))))))))))))))))))))))))))))
+
+(birewrite
+        (ListG (PWWWW (OrbitalRotation) phi w0 w1 w2 w3) tail)
+;----------------------------------------
+        (ListG (PWW (FermionicSWAP) pi w1 w2)
+        (ListG (PWW (SingleExcitation) phi w0 w1)
+        (ListG (PWW (SingleExcitation) phi w2 w3)
+        (ListG (PWW (FermionicSWAP) pi w1 w2) tail)))))
+
+
+(birewrite
+        (ListG (PWW (FermionicSWAP) phi w0 w1) tail)
+;----------------------------------------
+        (ListG (W (Hadamard) w0)
+        (ListG (W (Hadamard) w1)
+        (ListG (PWW (MultiRZ) (Div phi (Num 2)) w0 w1)
+        (ListG (W (Hadamard) w0)
+        (ListG (W (Hadamard) w1)
+        (ListG (PW (RX) piDiv2 w0)
+        (ListG (PW (RX) piDiv2 w1)
+        (ListG (PWW (MultiRZ) (Div phi (Num 2)) w0 w1)
+        (ListG (PW (RX) mpiDiv2 w0)
+        (ListG (PW (RX) mpiDiv2 w1)
+        (ListG (PW (RZ) (Div phi (Num 2)) w0)
+        (ListG (PW (RZ) (Div phi (Num 2)) w1)
+        (ListG (GP (Exp) (WM (Identity) (ListS w0 (ListS w1 (EmptyS)))) (Mul (Div phi (Num 2)) (Label "i"))) tail))))))))))))))
+
+
+
+
+; REORDERING
+(birewrite
+        (ListG (W g w0) (ListG (W h w1) tail))
+;-----------------------------------------------
+        (ListG (W h w1) (ListG (W g w0) tail))
+        :when ((!= w0 w1)))
+
+; REORDERING
+(birewrite
+        (ListG (W g w0) (ListG (WW h w1 w2) tail))
+;-----------------------------------------------
+        (ListG (WW h w1 w2) (ListG (W g w0) tail))
+        :when ((!= w0 w1) (!= w0 w2)))
+
+; REORDERING
+(birewrite
+        (ListG (W g w0) (ListG (WWW h w1 w2 w3) tail))
+;-----------------------------------------------
+        (ListG (WWW h w1 w2 w3) (ListG (W g w0) tail))
+        :when ((!= w0 w1) (!= w0 w2) (!= w0 w3)))
+
+; REORDERING
+(birewrite
+        (ListG (WW g w0 w1) (ListG (WW h w2 w3) tail))
+;-----------------------------------------------
+        (ListG (WW h w2 w3) (ListG (WW g w0 w1) tail))
+        :when ((!= w0 w2) (!= w0 w3) (!= w1 w2) (!= w1 w3)))
+
+; REORDERING
+(birewrite
+        (ListG (WW g w0 w1) (ListG (WWW h w2 w3 w4) tail))
+;-----------------------------------------------
+        (ListG (WWW h w2 w3 w4) (ListG (WW g w0 w1) tail))
+        :when ((!= w0 w2) (!= w0 w3) (!= w1 w2) (!= w1 w3) (!= w0 w4) (!= w1 w4)))
+
+; REORDERING
+(birewrite
+        (ListG (PW g phi w0) (ListG (W h w1) tail))
+;-----------------------------------------------
+        (ListG (W h w1) (ListG (PW g phi w0) tail))
+        :when ((!= w0 w1)))
+
+; REORDERING
+(birewrite
+        (ListG (PW g phi w0) (ListG (WW h w1 w2) tail))
+;-----------------------------------------------
+        (ListG (WW h w1 w2) (ListG (PW g phi w0) tail))
+        :when ((!= w0 w1) (!= w0 w2)))
+
+; REORDERING
+(birewrite
+        (ListG (PW g phi w0) (ListG (WWW h w1 w2 w3) tail))
+;-----------------------------------------------
+        (ListG (WWW h w1 w2 w3) (ListG (PW g phi w0) tail))
+        :when ((!= w0 w1) (!= w0 w2) (!= w0 w3)))
+
+; REORDERING
+(birewrite
+        (ListG (PWW g phi w0 w1) (ListG (WW h w2 w3) tail))
+;-----------------------------------------------
+        (ListG (WW h w2 w3) (ListG (PWW g phi w0 w1) tail))
+        :when ((!= w0 w2) (!= w0 w3) (!= w1 w2) (!= w1 w3)))
+
+; REORDERING
+(birewrite
+        (ListG (PWW g phi w0 w1) (ListG (WWW h w2 w3 w4) tail))
+;-----------------------------------------------
+        (ListG (WWW h w2 w3 w4) (ListG (PWW g phi w0 w1) tail))
+        :when ((!= w0 w2) (!= w0 w3) (!= w1 w2) (!= w1 w3) (!= w0 w4) (!= w1 w4)))
+
+; REORDERING
+(birewrite
+        (ListG (PW g phi w0) (ListG (W h w1) tail))
+;-----------------------------------------------
+        (ListG (W h w1) (ListG (PW g phi w0) tail))
+        :when ((!= w0 w1)))
+
+; ELIMINATION
+(rewrite
+        (ListG head (ListG g (ListG g tail)))
+;-----------------------------------------------
+        (ListG head tail))
+
+
+(define phi0 (Label "phi"))
+(define wire0 (Label "w0"))
+(define wire1 (Label "w1"))
+(define wire2 (Label "w2"))
+(define wire3 (Label "w3"))
+
+
+(define circuit0
+        (ListG (PWWWW (OrbitalRotation) phi0 wire0 wire1 wire2 wire3) (EmptyG)))
+
+
+
+
+(run 2000)
+(extract circuit0)
+
+	
+
